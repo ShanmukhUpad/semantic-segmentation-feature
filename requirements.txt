@@ -1,0 +1,24 @@
+# Core deep learning stack
+# The torch build below is the CPU build. On a CUDA machine install the matching
+# CUDA build of torch and torchvision from the official PyTorch index first.
+torch==2.12.0
+torchvision==0.27.0
+
+# Numerics and data handling
+numpy==2.4.3
+pandas==2.3.3
+scipy==1.17.1
+scikit-learn==1.8.0
+pillow==12.1.1
+
+# Visualization
+matplotlib==3.10.8
+seaborn==0.13.2
+
+# Config, progress and logging
+pyyaml==6.0.3
+tqdm==4.67.3
+tensorboard==2.20.0
+
+# Interactive upload GUI
+gradio==6.19.0

@@ -1,0 +1,58 @@
+# Small CPU friendly config that uses the synthetic dummy dataset.
+# No download is needed. Use this to verify the pipeline end to end.
+seed: 42
+output_dir: results/dummy_run
+device: auto                  # auto, cpu or cuda
+
+dataset:
+  name: dummy
+  root: results/data         # unused by the dummy dataset, kept for a uniform schema
+  num_classes: 7
+  ignore_index: 255
+  image_size: [128, 128]     # small so the CPU smoke test stays quick
+  subset: null               # set to an integer to cap both splits for a fast dev loop
+  dummy:
+    num_train: 32
+    num_val: 8
+    num_test: 8
+    grid: 16                 # low resolution label grid before upsampling
+    decay: 0.6               # class frequency decay, smaller means more imbalance
+    noise: 0.08              # Gaussian noise added to the palette colors
+
+augmentation:
+  enabled: true
+  random_hflip: true
+  random_vflip: true
+  random_rot90: true
+  color_jitter: true
+  jitter: 0.2
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+dataloader:
+  batch_size: 4
+  num_workers: 0
+  pin_memory: false
+
+model:
+  name: deeplabv3_resnet50
+  pretrained: false
+
+train:
+  epochs: 3
+  lr: 0.001
+  weight_decay: 0.0001
+  optimizer: adam            # adam, adamw or sgd
+  scheduler: none            # none, step or cosine
+  loss: cross_entropy
+  aux_loss_weight: 0.4       # weight on the DeepLabV3 auxiliary head
+  grad_accum_steps: 1        # raise to simulate a larger batch on small memory
+  amp: false                 # mixed precision, active only on a CUDA device
+  save_every: 0              # also save a checkpoint every N epochs when greater than zero
+  log_images: 4              # validation samples logged to the TensorBoard Images tab
+
+analysis:
+  boundary_width: 3          # pixels on each side of a class boundary counted as boundary
+  num_error_images: 4        # worst scoring images rendered as error maps
+  confidence_bins: 20        # bins in the confidence histogram
+  size_bins: 3               # number of class frequency bins

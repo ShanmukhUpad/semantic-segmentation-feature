@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Results, checkpoints and logs (keep the folder, ignore the contents)
+results/*
+!results/.gitkeep
+runs/
+*.pth
+*.pt
+*.ckpt
+events.out.tfevents.*
+
+# Downloaded datasets
+data/raw/
+datasets/
+*.tif
+*.tiff
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
