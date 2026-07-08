@@ -7,8 +7,10 @@ Run from the project root.
 This launches a browser GUI where an image can be uploaded and the model prediction is shown as
 a colored overlay together with a confidence map. A ground truth label image can be uploaded as
 an optional second input. When it is present the app also shows the true correct versus
-incorrect map and reports pixel accuracy and mean IoU. Without a ground truth there is nothing
-to compare against, so the confidence map is the proxy for where the model is likely wrong.
+incorrect map and reports pixel accuracy and mean IoU. Without a ground truth the app switches
+to the label free failure view, namely the entropy, margin risk and combined failure score maps
+plus a novelty score against the training distribution when an ood_reference.pt file sits next
+to the checkpoint. Build that file once with scripts/fit_ood.py.
 
 Note that a model trained only on the synthetic dummy data will produce meaningless predictions
 on real photographs. The app becomes useful once the model is trained on real land cover data.
@@ -19,6 +21,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from pathlib import Path  # noqa: E402
+
 import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
@@ -28,7 +32,14 @@ import torch  # noqa: E402
 import torchvision.transforms.functional as TF  # noqa: E402
 from PIL import Image  # noqa: E402
 
+from analysis import ood  # noqa: E402
 from analysis.error_maps import colorize, get_palette  # noqa: E402
+from analysis.uncertainty import (  # noqa: E402
+    failure_score,
+    margin,
+    max_softmax_confidence,
+    predictive_entropy,
+)
 from models.registry import build_model  # noqa: E402
 from utils.config import Config, load_config  # noqa: E402
 from utils.device import get_device  # noqa: E402
@@ -63,6 +74,11 @@ class Predictor:
         self.model.load_state_dict(checkpoint["model"])
         self.model.eval()
 
+        # Novelty scoring works only when a fitted reference sits next to the checkpoint.
+        self.ood_reference = ood.load_reference(
+            Path(checkpoint_path).parent / "ood_reference.pt"
+        )
+
         names = self._class_names()
         self.class_names = names
         self.palette = get_palette(self.num_classes)
@@ -96,7 +112,11 @@ class Predictor:
         return legend
 
     def _infer(self, image_rgb):
-        """Return a full resolution prediction map and confidence map for one RGB image."""
+        """Return the prediction map, the label free risk maps and a novelty summary.
+
+        The prediction and every risk map come back at the resolution of the uploaded
+        image. The novelty summary is None when no fitted reference is available.
+        """
         original_hw = image_rgb.shape[:2]
         tensor = torch.from_numpy(image_rgb.copy()).permute(2, 0, 1).float() / 255.0
         resized = TF.resize(tensor, list(self.image_size), interpolation=BILINEAR, antialias=True)
@@ -104,8 +124,13 @@ class Predictor:
         with torch.no_grad():
             output = self.model(normalized)
             logits = output["out"] if isinstance(output, dict) else output
-            probs = torch.softmax(logits, dim=1)
-            confidence, prediction = probs.max(dim=1)
+            prediction = logits.argmax(dim=1)
+            maps = {
+                "confidence": max_softmax_confidence(logits),
+                "entropy": predictive_entropy(logits),
+                "margin risk": margin(logits),
+                "failure score": failure_score(logits),
+            }
         prediction_full = (
             TF.resize(prediction.float().unsqueeze(1).cpu(), list(original_hw), interpolation=NEAREST)
             .squeeze(1)
@@ -113,13 +138,28 @@ class Predictor:
             .long()
             .numpy()
         )
-        confidence_full = (
-            TF.resize(confidence.unsqueeze(1).cpu(), list(original_hw), interpolation=BILINEAR)
-            .squeeze(1)
-            .squeeze(0)
-            .numpy()
-        )
-        return prediction_full, confidence_full
+        maps_full = {
+            name: (
+                TF.resize(value.unsqueeze(1).cpu(), list(original_hw), interpolation=BILINEAR)
+                .squeeze(1)
+                .squeeze(0)
+                .numpy()
+            )
+            for name, value in maps.items()
+        }
+        return prediction_full, maps_full, self._novelty(normalized)
+
+    def _novelty(self, normalized):
+        """Score one normalized batch against the reference, or return None without one."""
+        if self.ood_reference is None:
+            return None
+        distances, novelty = ood.score_images(self.model, normalized, self.ood_reference)
+        distance = float(distances[0])
+        return {
+            "distance": distance,
+            "novelty": float(novelty[0]),
+            "verdict": ood.verdict(distance, self.ood_reference),
+        }
 
     def _read_ground_truth(self, path, target_hw):
         """Read a label image and resize it to the target size with nearest neighbor."""
@@ -131,22 +171,26 @@ class Predictor:
         resized = TF.resize(tensor, list(target_hw), interpolation=NEAREST)
         return resized.squeeze(1).squeeze(0).long().numpy()
 
+    @staticmethod
+    def _heatmap(values):
+        """Render a zero to one map with the magma colormap as an RGB image."""
+        return (plt.get_cmap("magma")(np.clip(values, 0.0, 1.0))[..., :3] * 255).astype(np.uint8)
+
     def predict(self, image_rgb, ground_truth_path):
         """Run the model and return a gallery of result panels and a metrics summary."""
         if image_rgb is None:
             return [], "Upload an image to begin."
         image_rgb = np.asarray(image_rgb)[..., :3].astype(np.uint8)
-        prediction, confidence = self._infer(image_rgb)
+        prediction, maps, novelty = self._infer(image_rgb)
 
         prediction_color = colorize(prediction, self.num_classes, self.palette, self.ignore_index)
         overlay = (0.5 * image_rgb + 0.5 * prediction_color).astype(np.uint8)
-        heat = (plt.get_cmap("magma")(np.clip(confidence, 0.0, 1.0))[..., :3] * 255).astype(np.uint8)
 
         gallery = [
             (image_rgb, "input"),
             (overlay, "prediction overlay"),
             (prediction_color, "prediction"),
-            (heat, "confidence, bright is confident"),
+            (self._heatmap(maps["confidence"]), "confidence, bright is confident"),
         ]
 
         if ground_truth_path:
@@ -172,13 +216,36 @@ class Predictor:
                 f"- correct pixels {correct} of {total}"
             )
         else:
-            summary = (
-                "### No ground truth uploaded\n\n"
-                "Showing the prediction and the confidence map. Without a ground truth there is "
-                "nothing to score against, so treat the dark areas of the confidence map as the "
-                "places the model is least sure and most likely wrong. Upload a label image to "
-                "get the true correct versus incorrect map and the scores."
+            gallery.append((self._heatmap(maps["entropy"]), "entropy, bright is uncertain"))
+            gallery.append(
+                (self._heatmap(maps["margin risk"]), "margin risk, bright means two classes compete")
             )
+            gallery.append(
+                (self._heatmap(maps["failure score"]), "failure score, bright is likely wrong")
+            )
+            summary_lines = [
+                "### No ground truth uploaded",
+                "",
+                "Showing the label free failure view. Bright areas of the entropy, margin risk "
+                "and failure score maps mark the pixels where the model is least trustworthy and "
+                "most likely wrong. Upload a label image to get the true correct versus "
+                "incorrect map and the scores.",
+            ]
+            if novelty is not None:
+                summary_lines += [
+                    "",
+                    f"Novelty against the training distribution is {novelty['novelty']:.2f} on a "
+                    f"zero to one scale, verdict {novelty['verdict']} (Mahalanobis distance "
+                    f"{novelty['distance']:.1f}). A high verdict means the scene looks unlike the "
+                    "training data, so even confident predictions deserve little trust there.",
+                ]
+            else:
+                summary_lines += [
+                    "",
+                    "No ood_reference.pt was found next to the checkpoint, so the novelty score "
+                    "is unavailable. Build it once with scripts/fit_ood.py to enable it.",
+                ]
+            summary = "\n".join(summary_lines)
 
         gallery.append((self.legend, "class colors"))
         return gallery, summary
@@ -197,6 +264,13 @@ def build_interface(predictor):
         header += (
             "\n\nThis checkpoint is trained on the synthetic dummy data, so predictions on real "
             "photographs will not be meaningful until the model is trained on real land cover."
+        )
+    if predictor.dataset_name == "loveda":
+        header += (
+            "\n\nThe model was trained only on LoveDA imagery of China at 0.3 m per pixel, so a "
+            "scene from a very different geography or ground resolution will degrade. Without a "
+            "ground truth the app shows the label free failure maps, which mark where the model "
+            "is least trustworthy."
         )
 
     with gr.Blocks(title="Segmentation prediction viewer") as demo:

@@ -23,6 +23,7 @@ events.out.tfevents.*
 # Downloaded datasets
 data/raw/
 datasets/
+urban-segmentation/
 *.tif
 *.tiff
 

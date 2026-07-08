@@ -135,9 +135,64 @@ the results, then saves the run to Google Drive.
 
 ### ISPRS Potsdam
 
-Cut the Potsdam orthophotos and labels into patches ahead of time and place them in an images
-folder and a labels folder per split. Labels are expected as RGB color coded PNG tiles using
-the standard six class Potsdam palette.
+Cut the Potsdam orthophotos and labels into patches with scripts/prepare_potsdam.py, which
+writes an images folder and a labels folder per split in the layout the loader expects. Labels
+are RGB color coded tiles using the standard six class Potsdam palette. Potsdam is 0.05 m per
+pixel while LoveDA is 0.3 m, so the default patch size of 2304 lands at 0.3 m per pixel once
+resized to a 384 network input. Use 3072 patches for a 512 input.
+
+```
+python scripts/prepare_potsdam.py --images path/to/potsdam_rgb --labels path/to/potsdam_labels --output data/raw/PotsdamPatches
+```
+
+## Label free failure detection anywhere in the world
+
+The model is trained on LoveDA, which covers China at 0.3 m per pixel, but inference can run
+on aerial imagery from any place on earth. Such imagery has no labels, so these tools work
+label free. Entropy is high where the model spreads probability over many classes. Margin risk
+is high where the top two classes compete. The combined failure score blends them with the
+confidence shortfall into a single heatmap of where the model is least trustworthy. Novelty
+compares each image against the training distribution in backbone feature space and flags
+scenes the model has never seen, where it can be confidently wrong.
+
+Build the novelty reference once per checkpoint.
+
+```
+python scripts/fit_ood.py --checkpoint results/loveda_deeplabv3/checkpoints/best.pth
+```
+
+Then scan any folder of aerial images. The scanner slides a window at native resolution so the
+ground sample distance is preserved, stitches the prediction and uncertainty maps back to full
+size, and writes per image panels plus rankings.csv, rankings.json and a report of the least
+trustworthy images.
+
+```
+python scripts/scan_failures.py --checkpoint results/loveda_deeplabv3/checkpoints/best.pth --images path/to/tiles
+```
+
+The upload app shows the same failure maps when no ground truth is uploaded, plus a plain
+language novelty verdict when the reference file exists next to the checkpoint.
+
+### Validating the failure signals
+
+scripts/validate_signals.py checks that the label free signals actually predict true error on
+a labeled split. Per signal it reports AUROC, AUPR and the risk coverage area at ranking wrong
+pixels above correct ones, plus the Spearman correlation between the mean signal of an image
+and its true error rate.
+
+```
+python scripts/validate_signals.py --checkpoint results/loveda_deeplabv3/checkpoints/best.pth
+```
+
+For a genuine geographic domain shift test, prepare Potsdam patches as above and validate
+against them with the class mapping and the in domain run as the baseline.
+
+```
+python scripts/validate_signals.py --checkpoint results/loveda_deeplabv3/checkpoints/best.pth --set dataset.name=potsdam dataset.root=data/raw/PotsdamPatches --label-map potsdam_to_loveda --baseline-csv results/loveda_deeplabv3/validation/loveda_val/per_image.csv
+```
+
+The scanner, the validator and the patch cutter all carry a selftest that needs no data and no
+GPU, for example python scripts/scan_failures.py --selftest.
 
 ## Adding a new dataset
 

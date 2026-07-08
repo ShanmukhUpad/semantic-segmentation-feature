@@ -195,6 +195,9 @@ def main():
     cfg = load_config(args.config, args.set)
     set_seed(int(cfg.get_path("seed", 42)))
     device = get_device(str(cfg.get_path("device", "auto")))
+    if device.type == "cuda":
+        # Input size is fixed for a run, so cudnn autotune picks the fastest kernels.
+        torch.backends.cudnn.benchmark = True
 
     out_dir = Path(cfg.output_dir)
     ckpt_dir = out_dir / "checkpoints"
